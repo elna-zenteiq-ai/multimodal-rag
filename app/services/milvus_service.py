@@ -90,6 +90,7 @@ class MilvusService:
         return ids
 
     def search(self, query: str, top_k: int = 5) -> list[Document]:
+        #file_id: str, 
         """Search for similar documents.
 
         Args:
@@ -121,6 +122,7 @@ class MilvusService:
         results = self.vectorstore.similarity_search_with_score(
             query=query,
             k=top_k,
+            #filter=f"file_id == '{file_id}'"
         )
         return results
 

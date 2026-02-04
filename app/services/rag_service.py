@@ -53,7 +53,11 @@ Context:
             QueryResponse with answer and source documents
         """
         # Retrieve relevant documents
-        docs = self.milvus.search(query=question, top_k=top_k)
+        docs = self.milvus.search(
+            query=question,
+            file_id=committed_file_id,
+            top_k=top_k
+        )
 
         # Format context with source info
         context = self._format_context(docs)

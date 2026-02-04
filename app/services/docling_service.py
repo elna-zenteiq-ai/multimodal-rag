@@ -25,6 +25,7 @@ class DoclingService:
         self,
         file_content: bytes,
         filename: str,
+        file_id: str,
         minio_url: str | None = None,
     ) -> list[Document]:
         """Process a document and return chunks with metadata.
@@ -61,6 +62,7 @@ class DoclingService:
             for doc in docs:
                 # Build clean metadata for Milvus (only primitive types)
                 metadata = {
+                    "file_id": file_id,
                     "filename": filename,
                     "minio_url": minio_url or "",
                     "source": doc.metadata.get("source", ""),
