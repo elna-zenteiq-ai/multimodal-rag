@@ -1,4 +1,24 @@
 services:
+  # PostgreSQL database
+  postgres:
+    container_name: multimodal-rag-postgres
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: ragdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - milvus
+
   # Milvus standalone
   etcd:
     container_name: milvus-etcd
@@ -73,3 +93,4 @@ volumes:
   etcd_data:
   minio_data:
   milvus_data:
+  postgres_data:

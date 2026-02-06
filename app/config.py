@@ -31,10 +31,23 @@ class Settings(BaseSettings):
     # Milvus Configuration
     milvus_host: str = "localhost"
     milvus_port: int = 19530
-    milvus_collection: str = "docling_rag"
+    milvus_collection: str = "documents"
 
     # Embedding Model
     embed_model_id: str = "sentence-transformers/all-MiniLM-L6-v2"
+
+    # Message/File upload limits
+    max_files_per_message: int = 10
+    # Default per-file size limit (bytes) - 10 MiB
+    max_file_size_bytes: int = 10 * 1024 * 1024
+
+    # Database URL for persistence (overridable via .env DATABASE_URL)
+    database_url: str = "sqlite:///./app.db"
+
+    # Summary persistence and runtime limits
+    store_summaries_in_milvus: bool = True
+    # Maximum number of summaries to inject as context to LLM (protects context window)
+    max_summary_injection: int = 10
 
     @property
     def milvus_uri(self) -> str:

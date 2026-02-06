@@ -26,7 +26,6 @@ class SourceDocument(BaseModel):
     filename: str = Field(..., description="Source filename")
     page_numbers: list[int] = Field(default_factory=list, description="Page numbers")
     heading: str | None = Field(default=None, description="Section heading")
-    minio_url: str | None = Field(default=None, description="URL to raw file in MinIO")
 
 
 class QueryResponse(BaseModel):
@@ -51,3 +50,26 @@ class HealthResponse(BaseModel):
     status: str
     milvus: str
     minio: str
+    postgres: str
+
+
+class MessageResponse(BaseModel):
+    """Response schema for sending a message with optional files."""
+
+    message_id: str | None = Field(default=None, description="Created message id if message provided")
+    file_ids: list[str] = Field(default_factory=list, description="IDs of uploaded files")
+    conversation_id: str | None = Field(default=None, description="Conversation id created or used for this request")
+
+class FileStatusInfo(BaseModel):
+    """File status information."""
+
+    file_id: str = Field(..., description="File ID")
+    filename: str = Field(..., description="Original filename")
+    status: str = Field(..., description="File status (PROCESSING, READY, FAILED)")
+
+
+class ConversationStatusResponse(BaseModel):
+    """Response schema for conversation status."""
+
+    conversation_id: str = Field(..., description="Conversation ID")
+    files: list[FileStatusInfo] = Field(default_factory=list, description="Files in conversation")

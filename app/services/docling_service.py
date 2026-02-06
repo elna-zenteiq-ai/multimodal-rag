@@ -26,6 +26,8 @@ class DoclingService:
         file_content: bytes,
         filename: str,
         minio_url: str | None = None,
+        file_id: str | None = None,
+        conversation_id: str | None = None,
     ) -> list[Document]:
         """Process a document and return chunks with metadata.
 
@@ -33,6 +35,8 @@ class DoclingService:
             file_content: Raw file bytes
             filename: Original filename
             minio_url: Optional MinIO URL to include in metadata
+            file_id: Optional file_id to include in chunk metadata for scoping
+            conversation_id: Optional conversation_id to include in chunk metadata
 
         Returns:
             List of LangChain Document objects with rich metadata
@@ -65,6 +69,10 @@ class DoclingService:
                     "minio_url": minio_url or "",
                     "source": doc.metadata.get("source", ""),
                 }
+                if file_id:
+                    metadata["file_id"] = file_id
+                if conversation_id:
+                    metadata["conversation_id"] = conversation_id
 
                 # Extract page numbers from dl_meta if available
                 page_numbers = self._extract_page_numbers(doc.metadata)
