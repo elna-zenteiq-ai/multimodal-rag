@@ -17,6 +17,8 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "docling>=2.0.0",
     "sentence-transformers>=2.0.0",
+    "sqlalchemy>=2.0.0",
+    "pydantic-settings>=2.0.0",
 ]
 
 [build-system]

@@ -31,10 +31,18 @@ class Settings(BaseSettings):
     # Milvus Configuration
     milvus_host: str = "localhost"
     milvus_port: int = 19530
-    milvus_collection: str = "docling_rag"
+    milvus_collection: str = "rag_collection"
 
     # Embedding Model
     embed_model_id: str = "sentence-transformers/all-MiniLM-L6-v2"
+
+    # Database Configuration
+    database_url: str = "postgresql://raguser:ragpassword@postgres:5432/multimodal_rag"
+
+    # Agent Configuration
+    max_summary_context: int = 10  # Max summaries to pass as context
+    top_k_relevant_files: int = 5  # Top K relevant files when more than max
+    max_files_per_upload: int = 10  # Max files per single upload request
 
     @property
     def milvus_uri(self) -> str:

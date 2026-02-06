@@ -1,4 +1,24 @@
 services:
+  # PostgreSQL Database
+  postgres:
+    container_name: postgres-db
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: raguser
+      POSTGRES_PASSWORD: ragpassword
+      POSTGRES_DB: multimodal_rag
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U raguser -d multimodal_rag"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - milvus
+
   # Milvus standalone
   etcd:
     container_name: milvus-etcd
@@ -73,3 +93,4 @@ volumes:
   etcd_data:
   minio_data:
   milvus_data:
+  postgres_data:
