@@ -20,7 +20,7 @@ from typing import Optional
 
 from langchain import agents
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import StructuredTool, tool
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 import psycopg
@@ -28,6 +28,7 @@ import psycopg
 from app.config import get_settings
 from app.database import get_db_service
 from app.services.milvus_service import get_milvus_service
+from app.services.rag_tool import RAGToolRuntime, _format_search_results
 from app.services.summary_search import get_summary_search_service
 
 logger = logging.getLogger(__name__)
@@ -123,6 +124,11 @@ class AgentRAGService:
         self._checkpointer: AsyncPostgresSaver | None = None
         self._pg_conn: psycopg.AsyncConnection | None = None
 
+        # Track which file summaries have already been injected per thread.
+        # Key: conversation_id  →  Value: set of file_ids whose summaries
+        # have been pushed into the agent's message history.
+        self._injected_file_ids: dict[str, set[str]] = {}
+
     # ------------------------------------------------------------------
     # Lazy async checkpointer
     # ------------------------------------------------------------------
@@ -149,50 +155,47 @@ class AgentRAGService:
         file_ids: list[str],
         chunk_ids: list[str] | None = None,
         retrieved_docs: list | None = None,
-    ) -> StructuredTool:
-        """Create a rag_search tool scoped to the conversation's chunks."""
-        _retrieved = retrieved_docs if retrieved_docs is not None else []
+    ):
+        """Create a rag_search tool scoped to the conversation's files/chunks.
 
-        def rag_search_scoped(query: str, top_k: int = 5) -> str:
-            """Search documents scoped to specific files via their chunk IDs."""
+        Delegates to :class:`RAGToolRuntime` for the actual scoped search so
+        that scoping logic lives in a single place.
+        """
+        _retrieved = retrieved_docs if retrieved_docs is not None else []
+        runtime = RAGToolRuntime(file_ids=file_ids, chunk_ids=chunk_ids)
+
+        @tool
+        def rag_search(query: str, top_k: int = 5) -> str:
+            """Search uploaded documents for relevant passages.
+
+            Use this tool whenever you need specific details, facts,
+            guidelines, lists, comparisons, or any information beyond the
+            brief summaries already in your memory.
+
+            Args:
+                query: The search query describing what information you need.
+                top_k: Number of results to return (default 5).
+            """
             try:
-                if chunk_ids:
-                    results = self.milvus.search_by_chunk_ids(
-                        query=query, chunk_ids=chunk_ids, top_k=top_k
-                    )
-                else:
-                    results = self.milvus.search(query=query, top_k=top_k)
-                    if file_ids:
-                        results = [
-                            d for d in results if d.metadata.get("file_id") in file_ids
-                        ]
+                results = runtime.search(query=query, top_k=top_k)
 
                 if not results:
-                    logger.info("rag_search_scoped: no results found")
+                    logger.info("rag_search: no results for query=%s", query[:80])
                     return "No relevant information found in the specified documents."
 
                 _retrieved.extend(results)
                 logger.info(
-                    f"rag_search_scoped: {len(results)} results found, "
-                    f"_retrieved now has {len(_retrieved)} items"
+                    "rag_search: %d results, _retrieved now has %d items",
+                    len(results),
+                    len(_retrieved),
                 )
-
-                from app.services.rag_tool import _format_search_results
                 return _format_search_results(results, file_ids)
 
             except Exception as e:
-                logger.error(f"Error in RAG search: {e}")
-                return f"Error searching documents: {str(e)}"
+                logger.error("Error in RAG search: %s", e, exc_info=True)
+                return f"Error searching documents: {e}"
 
-        return StructuredTool.from_function(
-            func=rag_search_scoped,
-            name="rag_search",
-            description=(
-                "Search through the uploaded documents to find relevant passages. "
-                "Use this tool whenever you need specific details, facts, guidelines, "
-                "lists, or any information beyond the brief summaries in your memory."
-            ),
-        )
+        return rag_search
 
     # ------------------------------------------------------------------
     # Helpers
@@ -275,11 +278,36 @@ class AgentRAGService:
         # Build the messages to send in *this* invocation.
         messages: list = []
 
-        # On first query inject document summaries so the agent has context.
-        if self._is_first_query(conversation_id):
-            summary_ctx = self._build_summary_context(conversation_id)
-            if summary_ctx:
-                messages.append(SystemMessage(content=summary_ctx))
+        # Inject summaries for files not yet seen in this conversation.
+        # First query → all summaries.  Later queries → only NEW files.
+        # Already-injected summaries live in checkpointer short-term memory.
+        injected = self._injected_file_ids.get(conversation_id, set())
+        all_summaries = self.summary_search.get_conversation_summaries(
+            conversation_id
+        )
+        new_summaries = [
+            (fid, s) for fid, s in all_summaries if fid not in injected
+        ]
+        if new_summaries:
+            parts = []
+            for fid, summary in new_summaries:
+                file_obj = self.db_service.get_file(fid)
+                fname = file_obj.filename if file_obj else fid
+                parts.append(f"**{fname}** (id: {fid}):\n{summary}")
+            prefix = (
+                "New documents have been added to this conversation. "
+                "Their summaries:\n\n"
+                if injected
+                else
+                "The following documents have been uploaded to this "
+                "conversation. Their short summaries are provided below "
+                "for orientation. Use the rag_search tool to retrieve "
+                "more detailed content when needed.\n\n"
+            )
+            messages.append(SystemMessage(content=prefix + "\n\n".join(parts)))
+            self._injected_file_ids[conversation_id] = injected | {
+                fid for fid, _ in new_summaries
+            }
 
         messages.append(HumanMessage(content=query))
 

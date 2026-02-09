@@ -100,8 +100,8 @@ class RAGToolRuntime:
         self.file_ids = file_ids
         self.chunk_ids = chunk_ids
 
-    def execute(self, query: str, top_k: int = 5) -> str:
-        """Execute RAG search with scoped file/chunk IDs.
+    def search(self, query: str, top_k: int = 5) -> list[Document]:
+        """Run a scoped search and return raw Document objects.
 
         If chunk_ids are available, performs Milvus search scoped to those
         specific chunks.  Otherwise falls back to metadata-based filtering.
@@ -111,7 +111,7 @@ class RAGToolRuntime:
             top_k: Number of results
 
         Returns:
-            Search results as string
+            List of Document objects (may be empty)
         """
         milvus = get_milvus_service()
 
@@ -123,6 +123,22 @@ class RAGToolRuntime:
             results = milvus.search(query=query, top_k=top_k)
             if self.file_ids:
                 results = [d for d in results if d.metadata.get("file_id") in self.file_ids]
+
+        return results
+
+    def execute(self, query: str, top_k: int = 5) -> str:
+        """Execute RAG search with scoped file/chunk IDs.
+
+        Convenience wrapper that calls :meth:`search` and formats the output.
+
+        Args:
+            query: Search query
+            top_k: Number of results
+
+        Returns:
+            Search results as formatted string
+        """
+        results = self.search(query=query, top_k=top_k)
 
         if not results:
             return "No relevant information found in the documents."
