@@ -88,18 +88,23 @@ def _format_search_results(docs: list[Document], scoped_file_ids: Optional[list[
 
 
 class RAGToolRuntime:
-    """Runtime context manager for RAG tool with scoped file IDs."""
+    """Runtime context manager for RAG tool with scoped file/chunk IDs."""
 
-    def __init__(self, file_ids: list[str]):
-        """Initialize with file IDs to scope searches.
+    def __init__(self, file_ids: list[str], chunk_ids: list[str] | None = None):
+        """Initialize with file IDs and optional chunk IDs to scope searches.
 
         Args:
             file_ids: List of file IDs available in the context
+            chunk_ids: List of Milvus chunk IDs for targeted search
         """
         self.file_ids = file_ids
+        self.chunk_ids = chunk_ids
 
     def execute(self, query: str, top_k: int = 5) -> str:
-        """Execute RAG search with scoped file IDs.
+        """Execute RAG search with scoped file/chunk IDs.
+
+        If chunk_ids are available, performs Milvus search scoped to those
+        specific chunks.  Otherwise falls back to metadata-based filtering.
 
         Args:
             query: Search query
@@ -108,4 +113,18 @@ class RAGToolRuntime:
         Returns:
             Search results as string
         """
-        return rag_search(query=query, file_ids=self.file_ids, top_k=top_k)
+        milvus = get_milvus_service()
+
+        if self.chunk_ids:
+            results = milvus.search_by_chunk_ids(
+                query=query, chunk_ids=self.chunk_ids, top_k=top_k
+            )
+        else:
+            results = milvus.search(query=query, top_k=top_k)
+            if self.file_ids:
+                results = [d for d in results if d.metadata.get("file_id") in self.file_ids]
+
+        if not results:
+            return "No relevant information found in the documents."
+
+        return _format_search_results(results, self.file_ids)

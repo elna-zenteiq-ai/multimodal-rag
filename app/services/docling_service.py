@@ -1,15 +1,40 @@
-"""Docling service for document processing."""
+"""Docling service for document processing with image extraction."""
 
+import io
+import logging
 import os
 import tempfile
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from docling.chunking import HybridChunker
+from docling.datamodel.base_models import InputFormat
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling_core.types.doc import PictureItem
 from langchain_core.documents import Document
-from langchain_docling import DoclingLoader
-from langchain_docling.loader import ExportType
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ExtractedImage:
+    """An image extracted from a document by Docling."""
+
+    image_bytes: bytes
+    page_number: int
+    image_index: int  # index within the page
+    caption: str = ""  # text caption from the document, if any
+
+
+@dataclass
+class ProcessingResult:
+    """Result of processing a document: text chunks + extracted images."""
+
+    text_chunks: list[Document] = field(default_factory=list)
+    images: list[ExtractedImage] = field(default_factory=list)
 
 
 class DoclingService:
@@ -26,8 +51,8 @@ class DoclingService:
         file_content: bytes,
         filename: str,
         minio_url: str | None = None,
-    ) -> list[Document]:
-        """Process a document and return chunks with metadata.
+    ) -> ProcessingResult:
+        """Process a document and return text chunks + extracted images.
 
         Args:
             file_content: Raw file bytes
@@ -35,7 +60,7 @@ class DoclingService:
             minio_url: Optional MinIO URL to include in metadata
 
         Returns:
-            List of LangChain Document objects with rich metadata
+            ProcessingResult with text_chunks and images
         """
         # Write content to temp file for Docling to process
         with tempfile.NamedTemporaryFile(
@@ -46,124 +71,136 @@ class DoclingService:
             tmp_path = tmp_file.name
 
         try:
-            # Create Docling loader with HybridChunker
-            loader = DoclingLoader(
-                file_path=tmp_path,
-                export_type=ExportType.DOC_CHUNKS,
-                chunker=HybridChunker(tokenizer=self.settings.embed_model_id),
+            # Configure PDF pipeline with image extraction enabled
+            pdf_pipeline_options = PdfPipelineOptions(
+                generate_picture_images=True,
+                images_scale=2.0,
+            )
+            converter = DocumentConverter(
+                format_options={
+                    InputFormat.PDF: PdfFormatOption(
+                        pipeline_options=pdf_pipeline_options,
+                    )
+                }
             )
 
-            # Load and process document
-            docs = loader.load()
+            # Convert document
+            conv_result = converter.convert(tmp_path)
+            doc_obj = conv_result.document
 
-            # Enrich metadata
+            # --- Text chunks via HybridChunker ---
+            chunker = HybridChunker(tokenizer=self.settings.embed_model_id)
+            chunks = list(chunker.chunk(doc_obj))
+
             enriched_docs = []
-            for doc in docs:
-                # Build clean metadata for Milvus (only primitive types)
+            for chunk in chunks:
+                # Build metadata
+                meta = chunk.meta
+                page_numbers = []
+                if hasattr(meta, "doc_items"):
+                    for item in meta.doc_items:
+                        if hasattr(item, "prov"):
+                            for prov in item.prov:
+                                pn = prov.page_no if hasattr(prov, "page_no") else None
+                                if pn and pn not in page_numbers:
+                                    page_numbers.append(pn)
+
+                headings = meta.headings if hasattr(meta, "headings") else []
+
                 metadata = {
                     "filename": filename,
                     "minio_url": minio_url or "",
-                    "source": doc.metadata.get("source", ""),
+                    "source": str(tmp_path),
+                    "page_numbers": ",".join(str(p) for p in sorted(page_numbers)) if page_numbers else "",
+                    "heading": headings[0] if headings else "",
+                    "headings": "|".join(headings) if headings else "",
+                    "chunk_type": "text",
+                    "image_minio_url": "",
                 }
-
-                # Extract page numbers from dl_meta if available
-                page_numbers = self._extract_page_numbers(doc.metadata)
-                if page_numbers:
-                    metadata["page_numbers"] = ",".join(str(p) for p in page_numbers)
-
-                # Extract headings
-                headings = self._extract_headings(doc.metadata)
-                metadata["heading"] = headings[0] if headings else ""
-                metadata["headings"] = "|".join(headings) if headings else ""
 
                 enriched_docs.append(
                     Document(
-                        page_content=doc.page_content,
+                        page_content=chunk.text,
                         metadata=metadata,
                     )
                 )
 
-            return enriched_docs
+            # --- Extract images from PictureItems ---
+            extracted_images: list[ExtractedImage] = []
+            page_img_counter: dict[int, int] = {}
+            for element, _level in doc_obj.iterate_items():
+                if isinstance(element, PictureItem):
+                    pil_image = element.get_image(doc_obj)
+                    if pil_image is None:
+                        continue
+
+                    # Determine page number
+                    page_no = 0
+                    if hasattr(element, "prov") and element.prov:
+                        page_no = element.prov[0].page_no if hasattr(element.prov[0], "page_no") else 0
+
+                    # Track per-page index
+                    page_img_counter[page_no] = page_img_counter.get(page_no, 0) + 1
+                    img_idx = page_img_counter[page_no]
+
+                    # Extract caption text if available
+                    caption = ""
+                    if hasattr(element, "caption") and element.caption:
+                        caption = str(element.caption)
+
+                    # Convert PIL image to PNG bytes
+                    buf = io.BytesIO()
+                    pil_image.save(buf, format="PNG")
+                    img_bytes = buf.getvalue()
+
+                    extracted_images.append(
+                        ExtractedImage(
+                            image_bytes=img_bytes,
+                            page_number=page_no,
+                            image_index=img_idx,
+                            caption=caption,
+                        )
+                    )
+
+            logger.info(
+                f"Processed '{filename}': {len(enriched_docs)} text chunks, "
+                f"{len(extracted_images)} images extracted"
+            )
+
+            return ProcessingResult(
+                text_chunks=enriched_docs,
+                images=extracted_images,
+            )
 
         finally:
             # Cleanup temp file
             Path(tmp_path).unlink(missing_ok=True)
 
-    def process_from_url(self, url: str, filename: str | None = None) -> list[Document]:
-        """Process a document from URL.
+    def process_standalone_image(
+        self, file_content: bytes, filename: str, minio_url: str = ""
+    ) -> ProcessingResult:
+        """Process a standalone image upload (not embedded in a PDF).
 
-        Args:
-            url: URL to the document (can be MinIO presigned URL)
-            filename: Optional filename to use in metadata
-
-        Returns:
-            List of LangChain Document objects
+        Returns a ProcessingResult with no text chunks and a single
+        ExtractedImage.
         """
-        # Create Docling loader with URL
-        loader = DoclingLoader(
-            file_path=url,
-            export_type=ExportType.DOC_CHUNKS,
-            chunker=HybridChunker(tokenizer=self.settings.embed_model_id),
+        return ProcessingResult(
+            text_chunks=[],
+            images=[
+                ExtractedImage(
+                    image_bytes=file_content,
+                    page_number=1,
+                    image_index=1,
+                    caption="",
+                )
+            ],
         )
 
-        docs = loader.load()
-
-        # Enrich metadata
-        enriched_docs = []
-        for doc in docs:
-            # Build clean metadata for Milvus (only primitive types)
-            metadata = {
-                "filename": filename or "",
-                "source_url": url,
-                "source": doc.metadata.get("source", ""),
-            }
-
-            # Extract page numbers
-            page_numbers = self._extract_page_numbers(doc.metadata)
-            if page_numbers:
-                metadata["page_numbers"] = ",".join(str(p) for p in page_numbers)
-
-            # Extract headings
-            headings = self._extract_headings(doc.metadata)
-            metadata["heading"] = headings[0] if headings else ""
-            metadata["headings"] = "|".join(headings) if headings else ""
-
-            enriched_docs.append(
-                Document(
-                    page_content=doc.page_content,
-                    metadata=metadata,
-                )
-            )
-
-        return enriched_docs
-
     @staticmethod
-    def _extract_page_numbers(metadata: dict) -> list[int]:
-        """Extract page numbers from Docling metadata."""
-        page_numbers = []
-
-        # Try to get from dl_meta structure
-        dl_meta = metadata.get("dl_meta", {})
-        if isinstance(dl_meta, dict):
-            doc_items = dl_meta.get("doc_items", [])
-            for item in doc_items:
-                prov = item.get("prov", [])
-                for p in prov:
-                    page_no = p.get("page_no")
-                    if page_no and page_no not in page_numbers:
-                        page_numbers.append(page_no)
-
-        return sorted(page_numbers)
-
-    @staticmethod
-    def _extract_headings(metadata: dict) -> list[str]:
-        """Extract headings from Docling metadata."""
-        # Try to get from dl_meta structure
-        dl_meta = metadata.get("dl_meta", {})
-        if isinstance(dl_meta, dict):
-            return dl_meta.get("headings", [])
-
-        return []
+    def is_image_file(filename: str) -> bool:
+        """Return True if the filename looks like a standalone image."""
+        ext = Path(filename).suffix.lower()
+        return ext in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff"}
 
 
 # Singleton instance

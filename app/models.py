@@ -30,6 +30,7 @@ class SourceDocument(BaseModel):
     page_numbers: list[int] = Field(default_factory=list, description="Page numbers")
     heading: str | None = Field(default=None, description="Section heading")
     minio_url: str | None = Field(default=None, description="URL to raw file in MinIO")
+    image_url: str | None = Field(default=None, description="URL to extracted image in MinIO")
 
 
 class QueryResponse(BaseModel):
@@ -129,6 +130,63 @@ class AgentQueryResponse(BaseModel):
     used_rag: bool = Field(
         ...,
         description="Whether RAG retrieval was performed",
+    )
+    sources: list[SourceDocument] = Field(
+        default_factory=list,
+        description="Source documents if available",
+    )
+
+
+# ===== NEW SEPARATED UPLOAD / STATUS / CHAT MODELS =====
+class FileUploadResponse(BaseModel):
+    """Response schema for the dedicated file upload endpoint."""
+
+    file_id: str = Field(..., description="Unique file identifier")
+    filename: str = Field(..., description="Original filename")
+    status: str = Field(
+        default="PROCESSING",
+        description="Processing status: PROCESSING, READY, or FAILED",
+    )
+    message: str = Field(
+        default="File uploaded. Processing started.",
+        description="Human-readable status message",
+    )
+
+
+class FileStatusResponse(BaseModel):
+    """Response schema for the file status endpoint."""
+
+    file_id: str = Field(..., description="File identifier")
+    filename: str = Field(..., description="Original filename")
+    status: str = Field(
+        ...,
+        description="Processing status: PROCESSING, READY, or FAILED",
+    )
+    summary: Optional[str] = Field(None, description="File summary (available when READY)")
+    chunk_count: int = Field(
+        default=0,
+        description="Number of indexed chunks in Milvus",
+    )
+    error_message: Optional[str] = Field(None, description="Error details if FAILED")
+
+
+class ChatRequest(BaseModel):
+    """Request schema for the chat endpoint."""
+
+    query: str = Field(..., description="User's question / message")
+    top_k: int = Field(default=5, ge=1, le=20, description="Number of chunks to retrieve")
+
+
+class ChatResponse(BaseModel):
+    """Response schema for the chat endpoint."""
+
+    message_id: str = Field(..., description="Unique message identifier")
+    conversation_id: str = Field(..., description="Conversation identifier")
+    answer: str = Field(..., description="Agent's response")
+    used_rag: bool = Field(..., description="Whether RAG search tool was used")
+    file_ids: list[str] = Field(
+        default_factory=list,
+        description="File IDs used for this query",
     )
     sources: list[SourceDocument] = Field(
         default_factory=list,

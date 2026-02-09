@@ -17,12 +17,13 @@ def reset_collection():
     )
     
     collection_name = settings.milvus_collection
-    if utility.has_collection(collection_name, using="reset"):
-        logger.info(f"Dropping collection: {collection_name}")
-        utility.drop_collection(collection_name, using="reset")
-        logger.info("Collection dropped successfully.")
-    else:
-        logger.info(f"Collection {collection_name} does not exist.")
+    for name in [collection_name, "file_summaries"]:
+        if utility.has_collection(name, using="reset"):
+            logger.info(f"Dropping collection: {name}")
+            utility.drop_collection(name, using="reset")
+            logger.info(f"Collection '{name}' dropped successfully.")
+        else:
+            logger.info(f"Collection {name} does not exist.")
 
 if __name__ == "__main__":
     reset_collection()

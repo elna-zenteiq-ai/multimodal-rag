@@ -14,6 +14,7 @@ from sqlalchemy import (
     Text,
     create_engine,
 )
+import json as _json
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 Base = declarative_base()
@@ -56,12 +57,14 @@ class File(Base):
 
     file_id = Column(String(36), primary_key=True)
     conversation_id = Column(String(36), ForeignKey("conversations.conversation_id"), nullable=False)
+    actor_id = Column(String(36), nullable=True)  # Actor/user who uploaded
     minio_url = Column(String(500), nullable=False)
     filename = Column(String(255), nullable=False)
     file_size = Column(Integer, nullable=True)  # in bytes
     status = Column(Enum(FileStatus), default=FileStatus.PROCESSING, nullable=False)
     summary = Column(Text, nullable=True)  # Generated summary text
     summary_embedding_id = Column(String(100), nullable=True)  # Reference to Milvus embedding
+    chunk_ids = Column(Text, nullable=True)  # JSON list of Milvus chunk IDs
     error_message = Column(Text, nullable=True)  # Error details if FAILED
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -108,16 +111,17 @@ class MessageFile(Base):
 class DatabaseService:
     """Service for database operations."""
 
-    def __init__(self, database_url: str = "sqlite:///./multimodal_rag.db"):
+    def __init__(self, database_url: str | None = None):
         """Initialize database connection.
 
         Args:
-            database_url: SQLAlchemy database URL
+            database_url: SQLAlchemy database URL. Defaults to settings.database_url (PostgreSQL).
         """
-        self.engine = create_engine(
-            database_url,
-            connect_args={"check_same_thread": False} if "sqlite" in database_url else {},
-        )
+        if database_url is None:
+            from app.config import get_settings
+            database_url = get_settings().database_url
+
+        self.engine = create_engine(database_url)
         Base.metadata.create_all(self.engine)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
 
@@ -173,6 +177,7 @@ class DatabaseService:
         minio_url: str,
         filename: str,
         file_size: int | None = None,
+        actor_id: str | None = None,
     ) -> File:
         """Create a new file record.
 
@@ -182,6 +187,7 @@ class DatabaseService:
             minio_url: URL to file in MinIO
             filename: Original filename
             file_size: File size in bytes
+            actor_id: Actor/user who uploaded the file
 
         Returns:
             File object
@@ -191,6 +197,7 @@ class DatabaseService:
             file = File(
                 file_id=file_id,
                 conversation_id=conversation_id,
+                actor_id=actor_id,
                 minio_url=minio_url,
                 filename=filename,
                 file_size=file_size,
@@ -203,7 +210,12 @@ class DatabaseService:
             session.close()
 
     def update_file_status(
-        self, file_id: str, status: FileStatus, summary: str | None = None, error_message: str | None = None
+        self,
+        file_id: str,
+        status: FileStatus,
+        summary: str | None = None,
+        chunk_ids: list[str] | None = None,
+        error_message: str | None = None,
     ) -> Optional[File]:
         """Update file processing status.
 
@@ -211,6 +223,7 @@ class DatabaseService:
             file_id: File ID
             status: New status
             summary: Summary text if ready
+            chunk_ids: List of Milvus chunk IDs
             error_message: Error message if failed
 
         Returns:
@@ -223,10 +236,55 @@ class DatabaseService:
                 file.status = status
                 if summary:
                     file.summary = summary
+                if chunk_ids is not None:
+                    file.chunk_ids = _json.dumps(chunk_ids)
                 if error_message:
                     file.error_message = error_message
                 session.commit()
             return file
+        finally:
+            session.close()
+
+    def get_file(self, file_id: str) -> Optional[File]:
+        """Get a single file by ID.
+
+        Args:
+            file_id: File ID
+
+        Returns:
+            File object or None
+        """
+        session = self.get_session()
+        try:
+            return session.query(File).filter_by(file_id=file_id).first()
+        finally:
+            session.close()
+
+    def get_chunk_ids_for_files(self, file_ids: list[str]) -> list[str]:
+        """Get all Milvus chunk IDs for a list of file IDs.
+
+        Goes to the SQL table, reads the chunk_ids JSON column for each file,
+        and returns a flat list of all chunk IDs.
+
+        Args:
+            file_ids: List of file IDs
+
+        Returns:
+            Flat list of Milvus chunk IDs
+        """
+        session = self.get_session()
+        try:
+            all_chunk_ids: list[str] = []
+            files = session.query(File).filter(File.file_id.in_(file_ids)).all()
+            for f in files:
+                if f.chunk_ids:
+                    try:
+                        ids = _json.loads(f.chunk_ids)
+                        if isinstance(ids, list):
+                            all_chunk_ids.extend(ids)
+                    except (_json.JSONDecodeError, TypeError):
+                        pass
+            return all_chunk_ids
         finally:
             session.close()
 
@@ -393,7 +451,7 @@ class DatabaseService:
 _db_service: DatabaseService | None = None
 
 
-def get_db_service(database_url: str = "sqlite:///./multimodal_rag.db") -> DatabaseService:
+def get_db_service(database_url: str | None = None) -> DatabaseService:
     """Get or create database service instance."""
     global _db_service
     if _db_service is None:

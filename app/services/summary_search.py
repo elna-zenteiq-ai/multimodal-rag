@@ -1,106 +1,112 @@
-"""Service for searching file summaries using similarity search."""
+"""Service for searching file summaries using similarity search — uses pymilvus directly."""
 
 import logging
 from typing import Optional
 
-from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_milvus import Milvus
+from pymilvus import (
+    Collection,
+    CollectionSchema,
+    DataType,
+    FieldSchema,
+    connections,
+    utility,
+)
 
 from app.config import get_settings
 from app.database import File, get_db_service
 
 logger = logging.getLogger(__name__)
 
+# Same embedding dim as the main collection
+_EMBEDDING_DIM = 384
+
+# Metadata fields for the summary collection
+_SUMMARY_META = ["file_id", "conversation_id", "type"]
+
 
 class FileSummarySearchService:
     """Service for searching and retrieving file summaries from Milvus."""
 
-    SUMMARY_COLLECTION = "file_summaries"  # Separate collection for summaries
-    MAX_SUMMARY_CONTEXT = 10  # Max summaries to pass as context
-    TOP_K_RELEVANT = 5  # Top K relevant files when more than MAX
+    SUMMARY_COLLECTION = "file_summaries"
+    MAX_SUMMARY_CONTEXT = 10
+    TOP_K_RELEVANT = 5
+
+    _ALIAS = "default"  # reuse the shared Milvus connection
 
     def __init__(self):
-        """Initialize file summary search service."""
         self.settings = get_settings()
         self.embeddings = HuggingFaceEmbeddings(
             model_name=self.settings.embed_model_id
         )
         self.db_service = get_db_service()
-        self._vectorstore: Optional[Milvus] = None
+        self._collection: Optional[Collection] = None
 
-    def _get_connection_args(self) -> dict:
-        """Get Milvus connection arguments."""
-        return {
-            "host": self.settings.milvus_host,
-            "port": self.settings.milvus_port,
-        }
+    # ------------------------------------------------------------------
+    # Collection helpers
+    # ------------------------------------------------------------------
+    def _ensure_collection(self) -> Collection:
+        """Return the summary collection, creating it if needed."""
+        if self._collection is not None:
+            return self._collection
 
-    def _init_vectorstore(self) -> Optional[Milvus]:
-        """Initialize or get vectorstore for summaries."""
-        if self._vectorstore is None:
-            try:
-                from pymilvus import connections, utility
+        # Make sure connection exists (MilvusService opens it on init,
+        # but be defensive in case summary_search is used standalone).
+        if not connections.has_connection(self._ALIAS):
+            connections.connect(
+                alias=self._ALIAS,
+                host=self.settings.milvus_host,
+                port=self.settings.milvus_port,
+            )
 
-                # Check if collection exists
-                connections.connect(
-                    alias="summary_check",
-                    host=self.settings.milvus_host,
-                    port=self.settings.milvus_port,
-                )
-                exists = utility.has_collection(self.SUMMARY_COLLECTION, using="summary_check")
-                connections.disconnect("summary_check")
+        name = self.SUMMARY_COLLECTION
 
-                if exists:
-                    self._vectorstore = Milvus(
-                        embedding_function=self.embeddings,
-                        collection_name=self.SUMMARY_COLLECTION,
-                        connection_args=self._get_connection_args(),
-                        auto_id=True,
-                    )
-            except Exception as e:
-                logger.warning(f"Failed to initialize summary vectorstore: {e}")
-        return self._vectorstore
+        if utility.has_collection(name, using=self._ALIAS):
+            self._collection = Collection(name=name, using=self._ALIAS)
+            self._collection.load()
+            return self._collection
 
+        fields = [
+            FieldSchema(name="pk", dtype=DataType.INT64, is_primary=True, auto_id=True),
+            FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=65535),
+            FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=_EMBEDDING_DIM),
+        ]
+        for meta_name in _SUMMARY_META:
+            fields.append(
+                FieldSchema(name=meta_name, dtype=DataType.VARCHAR, max_length=65535, default_value="")
+            )
+
+        schema = CollectionSchema(fields=fields, description="File summaries", auto_id=True)
+        self._collection = Collection(name=name, schema=schema, using=self._ALIAS)
+        self._collection.create_index(
+            field_name="vector",
+            index_params={"metric_type": "L2", "index_type": "IVF_FLAT", "params": {"nlist": 64}},
+        )
+        self._collection.load()
+        logger.info(f"Created summary collection '{name}'")
+        return self._collection
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
     def add_summary(self, file_id: str, conversation_id: str, summary: str) -> bool:
-        """Add a file summary to the search index.
-
-        Args:
-            file_id: File ID
-            conversation_id: Conversation ID
-            summary: Summary text
-
-        Returns:
-            True if successful, False otherwise
-        """
+        """Add a file summary to the search index."""
         if not summary or not summary.strip():
             logger.warning(f"Empty summary for file {file_id}")
             return False
 
         try:
-            # Create document with metadata
-            doc = Document(
-                page_content=summary,
-                metadata={
-                    "file_id": file_id,
-                    "conversation_id": conversation_id,
-                    "type": "summary",
-                },
-            )
+            col = self._ensure_collection()
+            vec = self.embeddings.embed_documents([summary])[0]
 
-            # Initialize vectorstore if needed
-            if self._vectorstore is None:
-                self._vectorstore = Milvus.from_documents(
-                    documents=[doc],
-                    embedding=self.embeddings,
-                    collection_name=self.SUMMARY_COLLECTION,
-                    connection_args=self._get_connection_args(),
-                    auto_id=True,
-                    drop_old=False,
-                )
-            else:
-                self._vectorstore.add_documents([doc])
-
+            col.insert([{
+                "text": summary,
+                "vector": vec,
+                "file_id": file_id,
+                "conversation_id": conversation_id,
+                "type": "summary",
+            }])
+            col.flush()
             logger.info(f"Added summary for file {file_id}")
             return True
 
@@ -113,39 +119,34 @@ class FileSummarySearchService:
     ) -> list[tuple[str, str, float]]:
         """Search for relevant file summaries in a conversation.
 
-        Args:
-            query: Search query
-            conversation_id: Conversation ID to scope search
-            top_k: Number of results to return (defaults to TOP_K_RELEVANT)
-
         Returns:
-            List of tuples: (file_id, summary, score)
+            List of tuples: (file_id, summary, distance)
         """
         if top_k is None:
             top_k = self.TOP_K_RELEVANT
 
         try:
-            vectorstore = self._init_vectorstore()
-            if vectorstore is None:
-                logger.warning("Summary vectorstore not available")
-                return []
+            col = self._ensure_collection()
+            query_vec = self.embeddings.embed_query(query)
 
-            # Search for similar summaries
-            results = vectorstore.similarity_search_with_score(
-                query=query,
-                k=top_k * 2,  # Get extra to filter by conversation
+            results = col.search(
+                data=[query_vec],
+                anns_field="vector",
+                param={"metric_type": "L2", "params": {"nprobe": 10}},
+                limit=top_k * 2,
+                output_fields=["text"] + _SUMMARY_META,
             )
 
-            # Filter by conversation_id and return top_k
-            conversation_results = []
-            for doc, score in results:
-                if doc.metadata.get("conversation_id") == conversation_id:
-                    file_id = doc.metadata.get("file_id", "")
-                    summary = doc.page_content
-                    conversation_results.append((file_id, summary, score))
-
-                if len(conversation_results) >= top_k:
-                    break
+            conversation_results: list[tuple[str, str, float]] = []
+            if results:
+                for hit in results[0]:
+                    entity = hit.entity
+                    if entity.get("conversation_id") == conversation_id:
+                        conversation_results.append(
+                            (entity.get("file_id", ""), entity.get("text", ""), hit.distance)
+                        )
+                    if len(conversation_results) >= top_k:
+                        break
 
             return conversation_results
 

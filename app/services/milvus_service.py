@@ -1,154 +1,361 @@
-"""Milvus service for vector storage and retrieval."""
+"""Milvus service for vector storage and retrieval — uses pymilvus directly."""
+
+import logging
+from typing import Optional
 
 from langchain_core.documents import Document
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_milvus import Milvus
-from pymilvus import connections, utility
+from pymilvus import (
+    Collection,
+    CollectionSchema,
+    DataType,
+    FieldSchema,
+    connections,
+    utility,
+)
 
 from app.config import get_settings
 
+logger = logging.getLogger(__name__)
+
+# 384-dim for sentence-transformers/all-MiniLM-L6-v2
+EMBEDDING_DIM = 384
+
+# Metadata fields stored alongside every chunk.
+# Each one becomes a VARCHAR column in Milvus.
+_META_FIELDS = [
+    "filename",
+    "minio_url",
+    "source",
+    "page_numbers",
+    "heading",
+    "headings",
+    "file_id",
+    "chunk_type",
+    "image_minio_url",
+]
+
 
 class MilvusService:
-    """Service for interacting with Milvus vector database."""
+    """Direct pymilvus service for vector storage and retrieval."""
 
-    def __init__(self):
-        """Initialize Milvus connection and embeddings."""
+    _ALIAS = "default"  # single persistent connection alias
+
+    def __init__(self) -> None:
         self.settings = get_settings()
         self.embeddings = HuggingFaceEmbeddings(
             model_name=self.settings.embed_model_id
         )
-        self._vectorstore: Milvus | None = None
+        self._collection: Optional[Collection] = None
+        self._connect()
 
-    def _get_connection_args(self) -> dict:
-        """Get Milvus connection arguments."""
-        return {
-            "host": self.settings.milvus_host,
-            "port": self.settings.milvus_port,
-        }
-
-    def _collection_exists(self) -> bool:
-        """Check if the collection already exists."""
+    # ------------------------------------------------------------------
+    # Connection & schema helpers
+    # ------------------------------------------------------------------
+    def _connect(self) -> None:
+        """Establish a persistent Milvus connection."""
         try:
             connections.connect(
-                alias="collection_check",
+                alias=self._ALIAS,
                 host=self.settings.milvus_host,
                 port=self.settings.milvus_port,
             )
-            exists = utility.has_collection(
-                self.settings.milvus_collection, using="collection_check"
+            logger.info(
+                f"Connected to Milvus at "
+                f"{self.settings.milvus_host}:{self.settings.milvus_port}"
             )
-            connections.disconnect("collection_check")
-            return exists
-        except Exception:
-            return False
+        except Exception as e:
+            logger.error(f"Failed to connect to Milvus: {e}")
 
-    @property
-    def vectorstore(self) -> Milvus:
-        """Get or initialize vectorstore."""
-        if self._vectorstore is None:
-            # If collection exists, load it
-            if self._collection_exists():
-                self._vectorstore = Milvus(
-                    embedding_function=self.embeddings,
-                    collection_name=self.settings.milvus_collection,
-                    connection_args=self._get_connection_args(),
-                    auto_id=True,
+    def _ensure_collection(self) -> Collection:
+        """Return the collection, creating it if it doesn't exist."""
+        if self._collection is not None:
+            return self._collection
+
+        name = self.settings.milvus_collection
+
+        if utility.has_collection(name, using=self._ALIAS):
+            self._collection = Collection(name=name, using=self._ALIAS)
+            self._collection.load()
+            logger.info(f"Loaded existing collection '{name}'")
+            return self._collection
+
+        # Build schema — INT64 auto-id PK, vector, text, plus metadata VARCHARs
+        fields = [
+            FieldSchema(
+                name="pk",
+                dtype=DataType.INT64,
+                is_primary=True,
+                auto_id=True,
+            ),
+            FieldSchema(
+                name="text",
+                dtype=DataType.VARCHAR,
+                max_length=65535,
+            ),
+            FieldSchema(
+                name="vector",
+                dtype=DataType.FLOAT_VECTOR,
+                dim=EMBEDDING_DIM,
+            ),
+        ]
+        for meta_name in _META_FIELDS:
+            fields.append(
+                FieldSchema(
+                    name=meta_name,
+                    dtype=DataType.VARCHAR,
+                    max_length=65535,
+                    default_value="",
                 )
-            else:
-                # If it doesn't exist, we can't search yet, but we shouldn't return None for a property 
-                # that claims to return Milvus. However, for search operations effectively there is no store.
-                # We will handle the None case in search() instead.
-                pass
-        return self._vectorstore
+            )
 
-    def add_documents(self, documents: list[Document]) -> list[str]:
-        """Add documents to the vector store.
+        schema = CollectionSchema(
+            fields=fields,
+            description="RAG document chunks with embeddings",
+            auto_id=True,
+        )
+
+        self._collection = Collection(
+            name=name, schema=schema, using=self._ALIAS
+        )
+
+        # Create IVF_FLAT index on the vector field
+        index_params = {
+            "metric_type": "L2",
+            "index_type": "IVF_FLAT",
+            "params": {"nlist": 128},
+        }
+        self._collection.create_index(
+            field_name="vector", index_params=index_params
+        )
+        self._collection.load()
+        logger.info(f"Created and loaded new collection '{name}'")
+        return self._collection
+
+    # ------------------------------------------------------------------
+    # Embedding helper
+    # ------------------------------------------------------------------
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed a batch of texts."""
+        return self.embeddings.embed_documents(texts)
+
+    def _embed_query(self, text: str) -> list[float]:
+        """Embed a single query string."""
+        return self.embeddings.embed_query(text)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def add_documents(
+        self, documents: list[Document], file_id: str | None = None
+    ) -> list[str]:
+        """Insert document chunks into Milvus.
 
         Args:
-            documents: List of LangChain Document objects
+            documents: LangChain Document objects (page_content + metadata).
+            file_id: Optional file ID injected into every chunk's metadata.
 
         Returns:
-            List of document IDs
+            List of stringified Milvus primary-key IDs.
         """
         if not documents:
             return []
 
-        # If collection doesn't exist or vectorstore not init, create it
-        if self._vectorstore is None:
-            self._vectorstore = Milvus.from_documents(
-                documents=documents,
-                embedding=self.embeddings,
-                collection_name=self.settings.milvus_collection,
-                connection_args=self._get_connection_args(),
-                auto_id=True,
-                drop_old=False,
-            )
-            return [f"doc_{i}" for i in range(len(documents))]
+        col = self._ensure_collection()
 
-        # Collection exists, use add_documents
-        ids = self.vectorstore.add_documents(documents)
-        return ids
+        # Inject file_id
+        if file_id:
+            for doc in documents:
+                doc.metadata["file_id"] = file_id
+
+        texts = [doc.page_content for doc in documents]
+        vectors = self._embed(texts)
+
+        # Build per-row insert data
+        insert_data: list[dict] = []
+        for doc, vec in zip(documents, vectors):
+            row: dict = {
+                "text": doc.page_content,
+                "vector": vec,
+            }
+            for meta_name in _META_FIELDS:
+                row[meta_name] = str(doc.metadata.get(meta_name, ""))
+            insert_data.append(row)
+
+        result = col.insert(insert_data)
+        col.flush()
+
+        # result.primary_keys contains the auto-generated INT64 PKs
+        pks = [str(pk) for pk in result.primary_keys]
+        logger.info(
+            f"Inserted {len(pks)} chunks into Milvus "
+            f"(sample PKs: {pks[:3]})"
+        )
+        return pks
 
     def search(self, query: str, top_k: int = 5) -> list[Document]:
-        """Search for similar documents.
+        """Similarity search across all chunks.
 
         Args:
-            query: Search query
-            top_k: Number of results to return
+            query: Search query.
+            top_k: Number of results.
 
         Returns:
-            List of matching Document objects with metadata
+            List of Document objects with metadata.
         """
-        if self.vectorstore is None:
+        col = self._ensure_collection()
+        query_vec = self._embed_query(query)
+
+        output_fields = ["text"] + _META_FIELDS
+        results = col.search(
+            data=[query_vec],
+            anns_field="vector",
+            param={"metric_type": "L2", "params": {"nprobe": 16}},
+            limit=top_k,
+            output_fields=output_fields,
+        )
+
+        return self._hits_to_documents(results)
+
+    def search_with_scores(
+        self, query: str, top_k: int = 5
+    ) -> list[tuple[Document, float]]:
+        """Similarity search with distance scores.
+
+        Args:
+            query: Search query.
+            top_k: Number of results.
+
+        Returns:
+            List of (Document, distance) tuples.
+        """
+        col = self._ensure_collection()
+        query_vec = self._embed_query(query)
+
+        output_fields = ["text"] + _META_FIELDS
+        results = col.search(
+            data=[query_vec],
+            anns_field="vector",
+            param={"metric_type": "L2", "params": {"nprobe": 16}},
+            limit=top_k,
+            output_fields=output_fields,
+        )
+
+        docs_with_scores: list[tuple[Document, float]] = []
+        if results:
+            for hit in results[0]:
+                entity = hit.entity
+                doc = Document(
+                    page_content=entity.get("text", ""),
+                    metadata={k: entity.get(k, "") for k in _META_FIELDS},
+                )
+                docs_with_scores.append((doc, hit.distance))
+        return docs_with_scores
+
+    def search_by_chunk_ids(
+        self, query: str, chunk_ids: list[str], top_k: int = 5
+    ) -> list[Document]:
+        """Similarity search scoped to specific primary-key chunk IDs.
+
+        Args:
+            query: Search query.
+            chunk_ids: Stringified INT64 Milvus PKs.
+            top_k: Number of results.
+
+        Returns:
+            List of matching Document objects.
+        """
+        if not chunk_ids:
             return []
 
-        results = self.vectorstore.similarity_search(
-            query=query,
-            k=top_k,
+        col = self._ensure_collection()
+
+        # Convert to ints (skip any legacy non-integer IDs like "init_*")
+        int_ids = []
+        for cid in chunk_ids:
+            try:
+                int_ids.append(int(cid))
+            except (ValueError, TypeError):
+                logger.warning(f"Skipping non-integer chunk_id: {cid}")
+        if not int_ids:
+            logger.warning("No valid integer chunk IDs to search")
+            return []
+
+        query_vec = self._embed_query(query)
+        ids_csv = ", ".join(str(i) for i in int_ids)
+        expr = f"pk in [{ids_csv}]"
+
+        output_fields = ["text"] + _META_FIELDS
+        results = col.search(
+            data=[query_vec],
+            anns_field="vector",
+            param={"metric_type": "L2", "params": {"nprobe": 16}},
+            limit=min(top_k, len(int_ids)),
+            expr=expr,
+            output_fields=output_fields,
         )
-        return results
 
-    def search_with_scores(self, query: str, top_k: int = 5) -> list[tuple[Document, float]]:
-        """Search for similar documents with relevance scores.
-
-        Args:
-            query: Search query
-            top_k: Number of results to return
-
-        Returns:
-            List of (Document, score) tuples
-        """
-        results = self.vectorstore.similarity_search_with_score(
-            query=query,
-            k=top_k,
+        docs = self._hits_to_documents(results)
+        logger.info(
+            f"search_by_chunk_ids: query='{query[:50]}', "
+            f"chunk_ids_count={len(int_ids)}, results={len(docs)}"
         )
-        return results
+        return docs
 
     def check_health(self) -> bool:
-        """Check if Milvus is accessible.
-
-        Returns:
-            True if healthy, False otherwise
-        """
+        """Check if Milvus is reachable."""
         try:
-            connections.connect(
-                alias="health_check",
-                host=self.settings.milvus_host,
-                port=self.settings.milvus_port,
-            )
-            utility.list_collections(using="health_check")
-            connections.disconnect("health_check")
+            utility.list_collections(using=self._ALIAS)
             return True
         except Exception:
             return False
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _hits_to_documents(
+        results, *, max_l2_distance: float = 1.0
+    ) -> list[Document]:
+        """Convert pymilvus search results to LangChain Documents.
 
-# Singleton instance
+        Args:
+            results: Raw pymilvus search results.
+            max_l2_distance: Drop hits whose L2 distance exceeds this
+                threshold.  Lower = stricter.  1.0 works well for
+                384-dim MiniLM embeddings — keeps genuinely relevant
+                passages and drops cross-file noise.
+        """
+        docs: list[Document] = []
+        if not results:
+            return docs
+        for hit in results[0]:
+            if hit.distance > max_l2_distance:
+                logger.debug(
+                    f"Skipping hit pk={hit.id} with L2 distance "
+                    f"{hit.distance:.3f} > {max_l2_distance}"
+                )
+                continue
+            entity = hit.entity
+            metadata = {k: entity.get(k, "") for k in _META_FIELDS}
+            metadata["_distance"] = hit.distance
+            docs.append(
+                Document(
+                    page_content=entity.get("text", ""),
+                    metadata=metadata,
+                )
+            )
+        return docs
+
+
+# ------------------------------------------------------------------
+# Singleton
+# ------------------------------------------------------------------
 _milvus_service: MilvusService | None = None
 
 
 def get_milvus_service() -> MilvusService:
-    """Get or create Milvus service instance."""
+    """Get or create the MilvusService singleton."""
     global _milvus_service
     if _milvus_service is None:
         _milvus_service = MilvusService()

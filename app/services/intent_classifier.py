@@ -25,15 +25,29 @@ Respond in JSON format with exactly these fields:
 }}
 
 Intent Types:
-- HIGH_LEVEL: Requests for overview, comparison, summarization, or general insights that can be answered from summaries alone
+- HIGH_LEVEL: Requests for overview, summary, comparison, general insights,
+  or any broad question that can be answered from document summaries.
+  This includes short commands like "summarize", "overview", "what is this about?",
+  "give me a summary", "key points", "main findings", etc.
 - FACTUAL: Specific factual questions that require detailed retrieval and search
+  through document chunks (e.g. asking about a particular number, date, name, quote,
+  section, or specific detail).
 
-Ambiguity: Set to true if the message is unclear, vague, or requires clarification before proceeding.
+Ambiguity: Set to true ONLY if the message is genuinely unclear and you cannot
+determine what the user wants. Short imperative commands like "summarize" are
+NOT ambiguous — they clearly request a summary of the available documents.
 
 Examples:
-- "Summarize the main findings" → HIGH_LEVEL
-- "What are the differences between document A and B?" → HIGH_LEVEL
-- "What specific data point X was mentioned?" → FACTUAL
+- "summarize" → HIGH_LEVEL, is_ambiguous=false
+- "Summarize the main findings" → HIGH_LEVEL, is_ambiguous=false
+- "Give me an overview" → HIGH_LEVEL, is_ambiguous=false
+- "What is this document about?" → HIGH_LEVEL, is_ambiguous=false
+- "Key takeaways" → HIGH_LEVEL, is_ambiguous=false
+- "Compare document A and B" → HIGH_LEVEL, is_ambiguous=false
+- "What are the differences between document A and B?" → HIGH_LEVEL, is_ambiguous=false
+- "What specific data point X was mentioned?" → FACTUAL, is_ambiguous=false
+- "What was the revenue in Q3?" → FACTUAL, is_ambiguous=false
+- "What does section 4.2 say?" → FACTUAL, is_ambiguous=false
 - "Tell me about it" → AMBIGUOUS (unclear which document/aspect)
 
 User Message:

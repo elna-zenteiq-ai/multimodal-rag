@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     # NVIDIA API Configuration
     nvidia_api_key: str = ""
     nvidia_model: str = "openai/gpt-oss-120b"
+    nvidia_vision_model: str = "google/gemma-3-27b-it"
     nvidia_temperature: float = 0.7
     nvidia_top_p: float = 1.0
     nvidia_max_tokens: int = 4096
@@ -37,7 +38,7 @@ class Settings(BaseSettings):
     embed_model_id: str = "sentence-transformers/all-MiniLM-L6-v2"
 
     # Database Configuration
-    database_url: str = "postgresql://raguser:ragpassword@postgres:5432/multimodal_rag"
+    database_url: str = "postgresql://raguser:ragpassword@localhost:5432/multimodal_rag"
 
     # Agent Configuration
     max_summary_context: int = 10  # Max summaries to pass as context

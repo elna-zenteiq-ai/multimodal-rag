@@ -65,6 +65,33 @@ class MinioService:
 
         return doc_id, presigned_url
 
+    def upload_image(
+        self, image_bytes: bytes, filename: str, file_id: str
+    ) -> str:
+        """Upload an extracted image to MinIO.
+
+        Args:
+            image_bytes: Raw PNG bytes.
+            filename: Descriptive filename (e.g., 'figure_p3_1.png').
+            file_id: Parent file ID for namespacing.
+
+        Returns:
+            Presigned URL to the stored image.
+        """
+        object_name = f"images/{file_id}/{filename}"
+        ext = filename.rsplit(".", 1)[-1] if "." in filename else "png"
+        try:
+            self.client.put_object(
+                bucket_name=self.bucket,
+                object_name=object_name,
+                data=BytesIO(image_bytes),
+                length=len(image_bytes),
+                content_type=self._get_content_type(ext),
+            )
+        except S3Error as e:
+            raise RuntimeError(f"Failed to upload image: {e}") from e
+        return self.get_document_url(object_name)
+
     def get_document_url(self, object_name: str, expires: int = 7) -> str:
         """Get a presigned URL for a document.
 
