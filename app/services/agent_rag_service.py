@@ -23,6 +23,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.tools import StructuredTool, tool
 from langchain_nvidia_ai_endpoints import ChatNVIDIA
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langchain.agents.middleware.summarization import SummarizationMiddleware
 import psycopg
 
 from app.config import get_settings
@@ -275,6 +276,42 @@ class AgentRAGService:
             tools=tools,
             system_prompt=_SYSTEM_PROMPT,
             checkpointer=checkpointer,
+            middleware=[SummarizationMiddleware(
+                model = self.llm,
+                trigger={"tokens": 9500},  # Trigger summarization after every 9500 tokens in the message history
+                keep={"messages": 8},
+                summary_prompt = """
+                    You are summarizing a multimodal research conversation between a user and an AI assistant.
+
+                    The assistant may have analyzed:
+                    - Uploaded documents
+                    - Retrieved document passages via search
+                    - Uploaded or referenced images
+                    - Image-derived observations or visual descriptions
+
+                    Create a structured summary that preserves the essential research context so future queries can continue seamlessly.
+
+                    Your summary MUST capture:
+
+                    1. The user’s overall goals or objectives.
+                    2. Key questions asked so far.
+                    3. Important findings, conclusions, or interpretations made by the assistant.
+                    4. Which documents were referenced and why.
+                    5. Any image analyses or visual insights that influenced conclusions.
+                    6. Constraints, comparisons, or analytical directions established.
+                    7. Open questions or unresolved threads.
+
+                    Do NOT:
+                    - Write a casual chat-style recap.
+                    - Include raw tool outputs.
+                    - Omit references to visual analysis when relevant.
+                    - Add new interpretations.
+
+                    Write 1–3 dense, professional paragraphs that preserve analytical continuity.
+                    The summary must be detailed enough for the assistant to answer follow-up questions without access to the full original conversation.
+                    """
+
+                  )]
         )
 
         # Build the messages to send in *this* invocation.
