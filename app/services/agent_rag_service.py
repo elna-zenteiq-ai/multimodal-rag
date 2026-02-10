@@ -278,8 +278,8 @@ class AgentRAGService:
             checkpointer=checkpointer,
             middleware=[SummarizationMiddleware(
                 model = self.llm,
-                trigger={"tokens": 9500},  # Trigger summarization after every 9500 tokens in the message history
-                keep={"messages": 8},
+                trigger=("tokens",9500),  # Trigger summarization after every 9500 tokens in the message history
+                keep=("messages", 8),
                 summary_prompt = """
                     You are summarizing a multimodal research conversation between a user and an AI assistant.
 

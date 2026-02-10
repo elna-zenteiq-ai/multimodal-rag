@@ -186,13 +186,21 @@ async def health_check() -> HealthResponse:
     except Exception as e:
         logger.warning(f"Milvus health check failed: {e}")
         milvus_status = "error"
+    
+    try:
+        db_service = get_db_service()
+        db_status = "connected" if db_service.health_check() else "disconnected"
+    except Exception as e:
+        logger.warning(f"Database health check failed: {e}")
+        db_status = "error"
 
-    overall_status = "healthy" if minio_status == "connected" and milvus_status == "connected" else "degraded"
+    overall_status = "healthy" if minio_status == "connected" and milvus_status == "connected" and db_status == "connected" else "degraded"
 
     return HealthResponse(
         status=overall_status,
         milvus=milvus_status,
         minio=minio_status,
+        postgres=db_status,
     )
 
 

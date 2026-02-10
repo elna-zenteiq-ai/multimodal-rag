@@ -3,6 +3,7 @@
 from datetime import datetime
 from enum import Enum as PyEnum
 from typing import Optional
+from sqlalchemy import text
 import logging
 
 from sqlalchemy import (
@@ -116,6 +117,16 @@ class DatabaseService:
         self.engine = create_engine(database_url)
         Base.metadata.create_all(self.engine)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+    
+    def health_check(self) -> bool:
+        """Check database connectivity."""
+        try:
+            with self.engine.connect() as connection:
+                connection.execute(text("SELECT 1"))
+            return True
+        except Exception as e:
+            logger.error(f"Database health check failed: {e}")
+            return False
 
     def get_session(self):
         """Get a database session."""
