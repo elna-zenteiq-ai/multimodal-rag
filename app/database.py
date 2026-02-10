@@ -55,6 +55,7 @@ class File(Base):
     minio_url = Column(String(500), nullable=False)
     filename = Column(String(255), nullable=False)
     file_size = Column(Integer, nullable=True)  # in bytes
+    file_hash = Column(String(64), nullable=True, index=True)  # SHA-256 for deduplication
     status = Column(Enum(FileStatus), default=FileStatus.PROCESSING, nullable=False)
     summary = Column(Text, nullable=True)  # Generated summary text
     summary_embedding_id = Column(String(100), nullable=True)  # Reference to Milvus embedding
@@ -169,6 +170,7 @@ class DatabaseService:
         minio_url: str,
         filename: str,
         file_size: int | None = None,
+        file_hash: str | None = None,
         actor_id: str | None = None,
     ) -> File:
         """Create a new file record.
@@ -179,6 +181,7 @@ class DatabaseService:
             minio_url: URL to file in MinIO
             filename: Original filename
             file_size: File size in bytes
+            file_hash: SHA-256 hash for deduplication
             actor_id: Actor/user who uploaded the file
 
         Returns:
@@ -193,6 +196,7 @@ class DatabaseService:
                 minio_url=minio_url,
                 filename=filename,
                 file_size=file_size,
+                file_hash=file_hash,
                 status=FileStatus.PROCESSING,
             )
             session.add(file)
@@ -245,6 +249,28 @@ class DatabaseService:
             else:
                 logger.warning("File not found for status update: %s", file_id)
             return file
+        finally:
+            session.close()
+
+    def get_file_by_hash(
+        self, file_hash: str, conversation_id: str
+    ) -> Optional[File]:
+        """Find an existing file in a conversation by its SHA-256 hash.
+
+        Args:
+            file_hash: SHA-256 hex digest of the file content
+            conversation_id: Conversation to scope the lookup to
+
+        Returns:
+            File object if a duplicate exists, else None
+        """
+        session = self.get_session()
+        try:
+            return (
+                session.query(File)
+                .filter_by(file_hash=file_hash, conversation_id=conversation_id)
+                .first()
+            )
         finally:
             session.close()
 

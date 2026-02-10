@@ -2,6 +2,7 @@
 
 import logging
 import uuid
+import hashlib
 
 from fastapi import BackgroundTasks, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -414,6 +415,23 @@ async def upload_file(
 
         # 1. Upload to MinIO (first priority — fast, synchronous)
         _doc_id, minio_url = minio_service.upload_document(file_content, file.filename)
+        
+        # Compute file hash for deduplication (optional, can be used in future to check for duplicates)
+        file_hash = hashlib.sha256(file_content).hexdigest()
+
+        existing_file = db_service.get_file_by_hash(file_hash, conversation_id)
+        if existing_file:
+            logger.info(
+                "Duplicate file detected (hash=%s, existing_file=%s)",
+                file_hash[:12],
+                existing_file.file_id,
+            )
+            return FileUploadResponse(
+                file_id=existing_file.file_id,
+                filename=existing_file.filename,
+                status=existing_file.status.value,
+                message="Duplicate file detected. Using existing file.",
+            )
 
         # 2. Create file record in SQL
         db_service.create_file(
@@ -422,6 +440,7 @@ async def upload_file(
             minio_url=minio_url,
             filename=file.filename,
             file_size=len(file_content),
+            file_hash=file_hash,
             actor_id=actor_id,
         )
 
