@@ -113,6 +113,13 @@ class RAGToolRuntime:
         Returns:
             List of Document objects (may be empty)
         """
+        logger.info(
+            "RAGToolRuntime.search (query=%s, file_ids=%d, chunk_ids=%d, top_k=%d)",
+            query[:50],
+            len(self.file_ids),
+            len(self.chunk_ids) if self.chunk_ids else 0,
+            top_k,
+        )
         milvus = get_milvus_service()
 
         if self.chunk_ids:
@@ -124,6 +131,7 @@ class RAGToolRuntime:
             if self.file_ids:
                 results = [d for d in results if d.metadata.get("file_id") in self.file_ids]
 
+        logger.info("RAGToolRuntime.search returned %d results", len(results))
         return results
 
     def execute(self, query: str, top_k: int = 5) -> str:
@@ -138,9 +146,13 @@ class RAGToolRuntime:
         Returns:
             Search results as formatted string
         """
+        logger.info("RAGToolRuntime.execute (query=%s, top_k=%d)", query[:50], top_k)
         results = self.search(query=query, top_k=top_k)
 
         if not results:
+            logger.info("RAGToolRuntime.execute returned no results")
             return "No relevant information found in the documents."
 
-        return _format_search_results(results, self.file_ids)
+        formatted = _format_search_results(results, self.file_ids)
+        logger.info("RAGToolRuntime.execute formatted %d results", len(results))
+        return formatted

@@ -1,5 +1,6 @@
 """MinIO service for raw file storage."""
 
+import logging
 import uuid
 from datetime import timedelta
 from io import BytesIO
@@ -8,6 +9,8 @@ from minio import Minio
 from minio.error import S3Error
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class MinioService:
@@ -30,6 +33,9 @@ class MinioService:
         try:
             if not self.client.bucket_exists(self.bucket):
                 self.client.make_bucket(self.bucket)
+                logger.info("Created MinIO bucket '%s'", self.bucket)
+            else:
+                logger.info("MinIO bucket '%s' is ready", self.bucket)
         except S3Error as e:
             raise RuntimeError(f"Failed to create bucket: {e}") from e
 
@@ -56,6 +62,11 @@ class MinioService:
                 data=BytesIO(file_content),
                 length=len(file_content),
                 content_type=self._get_content_type(extension),
+            )
+            logger.info(
+                "Uploaded document to MinIO (object=%s, size=%d)",
+                object_name,
+                len(file_content),
             )
         except S3Error as e:
             raise RuntimeError(f"Failed to upload file: {e}") from e
@@ -87,6 +98,11 @@ class MinioService:
                 data=BytesIO(image_bytes),
                 length=len(image_bytes),
                 content_type=self._get_content_type(ext),
+            )
+            logger.info(
+                "Uploaded image to MinIO (object=%s, size=%d)",
+                object_name,
+                len(image_bytes),
             )
         except S3Error as e:
             raise RuntimeError(f"Failed to upload image: {e}") from e
@@ -131,6 +147,7 @@ class MinioService:
                         "minio_url": self.get_document_url(obj.object_name),
                         "uploaded_at": obj.last_modified.isoformat() if obj.last_modified else None,
                     })
+            logger.info("Listed %d objects in MinIO bucket '%s'", len(documents), self.bucket)
         except S3Error as e:
             raise RuntimeError(f"Failed to list documents: {e}") from e
 

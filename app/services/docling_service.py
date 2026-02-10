@@ -62,6 +62,7 @@ class DoclingService:
         Returns:
             ProcessingResult with text_chunks and images
         """
+        logger.info("Starting Docling processing for '%s'", filename)
         # Write content to temp file for Docling to process
         with tempfile.NamedTemporaryFile(
             delete=False,
@@ -163,8 +164,10 @@ class DoclingService:
                     )
 
             logger.info(
-                f"Processed '{filename}': {len(enriched_docs)} text chunks, "
-                f"{len(extracted_images)} images extracted"
+                "Processed '%s': %d text chunks, %d images extracted",
+                filename,
+                len(enriched_docs),
+                len(extracted_images),
             )
 
             return ProcessingResult(
@@ -184,6 +187,7 @@ class DoclingService:
         Returns a ProcessingResult with no text chunks and a single
         ExtractedImage.
         """
+        logger.info("Processing standalone image '%s'", filename)
         return ProcessingResult(
             text_chunks=[],
             images=[

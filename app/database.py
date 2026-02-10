@@ -3,6 +3,7 @@
 from datetime import datetime
 from enum import Enum as PyEnum
 from typing import Optional
+import logging
 
 from sqlalchemy import (
     Column,
@@ -18,6 +19,7 @@ import json as _json
 from sqlalchemy.orm import declarative_base, relationship, sessionmaker
 
 Base = declarative_base()
+logger = logging.getLogger(__name__)
 
 
 class FileStatus(str, PyEnum):
@@ -26,14 +28,6 @@ class FileStatus(str, PyEnum):
     PROCESSING = "PROCESSING"
     READY = "READY"
     FAILED = "FAILED"
-
-
-class MessageIntentType(str, PyEnum):
-    """Message intent classification."""
-
-    HIGH_LEVEL = "HIGH_LEVEL"  # Overview, compare, summarize all
-    FACTUAL = "FACTUAL"  # Requires retrieval
-    AMBIGUOUS = "AMBIGUOUS"  # Needs clarification
 
 
 class Conversation(Base):
@@ -75,16 +69,13 @@ class File(Base):
 
 
 class Message(Base):
-    """Stores message content, intent label and timestamps."""
+    """Stores message content and timestamps."""
 
     __tablename__ = "messages"
 
     message_id = Column(String(36), primary_key=True)
     conversation_id = Column(String(36), ForeignKey("conversations.conversation_id"), nullable=False)
     content = Column(Text, nullable=False)
-    intent = Column(Enum(MessageIntentType), nullable=True)  # Intent classification result
-    is_ambiguous = Column(Integer, default=0, nullable=False)  # Boolean: 0 or 1
-    clarification_question = Column(Text, nullable=True)  # If ambiguous, ask this
     created_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
@@ -143,6 +134,7 @@ class DatabaseService:
             conversation = Conversation(conversation_id=conversation_id)
             session.add(conversation)
             session.commit()
+            logger.info("Created conversation %s", conversation_id)
             # Access all attributes before session closes to load them
             conv_data = {
                 "conversation_id": conversation.conversation_id,
@@ -205,6 +197,12 @@ class DatabaseService:
             )
             session.add(file)
             session.commit()
+            logger.info(
+                "Created file record %s (conversation=%s, status=%s)",
+                file_id,
+                conversation_id,
+                FileStatus.PROCESSING.value,
+            )
             return file
         finally:
             session.close()
@@ -241,6 +239,11 @@ class DatabaseService:
                 if error_message:
                     file.error_message = error_message
                 session.commit()
+                logger.info(
+                    "Updated file status %s -> %s", file_id, status.value
+                )
+            else:
+                logger.warning("File not found for status update: %s", file_id)
             return file
         finally:
             session.close()
@@ -293,9 +296,6 @@ class DatabaseService:
         message_id: str,
         conversation_id: str,
         content: str,
-        intent: MessageIntentType | None = None,
-        is_ambiguous: bool = False,
-        clarification_question: str | None = None,
     ) -> Message:
         """Create a new message.
 
@@ -303,9 +303,6 @@ class DatabaseService:
             message_id: Unique message ID
             conversation_id: Associated conversation ID
             content: Message content
-            intent: Intent classification
-            is_ambiguous: Whether message is ambiguous
-            clarification_question: Clarification if ambiguous
 
         Returns:
             Message object
@@ -316,12 +313,14 @@ class DatabaseService:
                 message_id=message_id,
                 conversation_id=conversation_id,
                 content=content,
-                intent=intent,
-                is_ambiguous=1 if is_ambiguous else 0,
-                clarification_question=clarification_question,
             )
             session.add(message)
             session.commit()
+            logger.info(
+                "Created message %s (conversation=%s)",
+                message_id,
+                conversation_id,
+            )
             return message
         finally:
             session.close()
@@ -371,7 +370,11 @@ class DatabaseService:
             query = session.query(File).filter_by(conversation_id=conversation_id)
             if status:
                 query = query.filter_by(status=status)
-            return query.all()
+            files = query.all()
+            logger.info(
+                "Fetched %d files for conversation %s", len(files), conversation_id
+            )
+            return files
         finally:
             session.close()
 

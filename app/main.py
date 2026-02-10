@@ -12,7 +12,6 @@ from app.models import (
     ChatRequest,
     ChatResponse,
     ConversationInitResponse,
-    FileStatusResponse,
     FileUploadResponse,
     HealthResponse,
     SourceDocument,
@@ -73,6 +72,11 @@ async def process_file_async(
     """
     db_service = get_db_service()
     try:
+        logger.info(
+            "Starting processing for file %s (conversation=%s)",
+            file_id,
+            conversation_id,
+        )
         docling_service = get_docling_service()
         milvus_service = get_milvus_service()
         minio_service = get_minio_service()
@@ -153,7 +157,11 @@ async def process_file_async(
                 file_id, FileStatus.READY, chunk_ids=chunk_ids
             )
 
-        logger.info(f"File {file_id} processing complete")
+        logger.info(
+            "File %s processing complete (chunks=%d)",
+            file_id,
+            len(chunk_ids),
+        )
 
     except Exception as e:
         logger.error(f"Error processing file {file_id}: {e}", exc_info=True)
@@ -195,6 +203,8 @@ async def create_conversation() -> ConversationInitResponse:
         conversation_id = str(uuid.uuid4())
         db_service = get_db_service()
         conversation_data = db_service.create_conversation(conversation_id)
+
+        logger.info("Created conversation %s", conversation_id)
 
         return ConversationInitResponse(
             conversation_id=conversation_data["conversation_id"],
@@ -392,6 +402,13 @@ async def upload_file(
         if not conversation:
             db_service.create_conversation(conversation_id)
 
+        logger.info(
+            "Upload request received (conversation=%s, actor=%s, filename=%s)",
+            conversation_id,
+            actor_id,
+            file.filename,
+        )
+
         file_id = str(uuid.uuid4())
         file_content = await file.read()
 
@@ -417,7 +434,13 @@ async def upload_file(
             file.filename,
             minio_url,
         )
-        logger.info(f"File {file_id} uploaded by actor {actor_id}, processing queued")
+        logger.info(
+            "File %s uploaded by actor %s (conversation=%s, size=%d), processing queued",
+            file_id,
+            actor_id,
+            conversation_id,
+            len(file_content),
+        )
 
         return FileUploadResponse(
             file_id=file_id,
@@ -429,42 +452,6 @@ async def upload_file(
     except Exception as e:
         logger.error(f"Error uploading file: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
-
-
-@app.get("/files/{file_id}/status", response_model=FileStatusResponse, tags=["Files"])
-async def get_file_status(file_id: str) -> FileStatusResponse:
-    """Get the processing status of a file.
-
-    Reads the SQL table row for the given ``file_id`` and returns:
-    - **status** — PROCESSING / READY / FAILED
-    - **summary** — available once processing is complete
-    - **chunk_count** — number of Milvus chunk IDs stored
-    - **error_message** — details if processing failed
-    """
-    db_service = get_db_service()
-    file_record = db_service.get_file(file_id)
-
-    if not file_record:
-        raise HTTPException(status_code=404, detail="File not found")
-
-    # Parse chunk_ids to get count
-    chunk_count = 0
-    if file_record.chunk_ids:
-        import json as _json
-        try:
-            ids = _json.loads(file_record.chunk_ids)
-            chunk_count = len(ids) if isinstance(ids, list) else 0
-        except Exception:
-            pass
-
-    return FileStatusResponse(
-        file_id=file_record.file_id,
-        filename=file_record.filename,
-        status=file_record.status.value,
-        summary=file_record.summary,
-        chunk_count=chunk_count,
-        error_message=file_record.error_message,
-    )
 
 
 @app.post("/chat", response_model=ChatResponse, tags=["Chat"])
@@ -493,8 +480,29 @@ async def chat(
         all_files = db_service.get_conversation_files(conversation_id)
         ready_files = [f for f in all_files if f.status == FileStatus.READY]
         processing_files = [f for f in all_files if f.status == FileStatus.PROCESSING]
+        failed_files = [f for f in all_files if f.status == FileStatus.FAILED]
 
-        if not ready_files and processing_files:
+        logger.info(
+            "Chat request (conversation=%s, actor=%s, ready=%d, processing=%d, failed=%d)",
+            conversation_id,
+            actor_id,
+            len(ready_files),
+            len(processing_files),
+            len(failed_files),
+        )
+
+        if failed_files:
+            return ChatResponse(
+                message_id=str(uuid.uuid4()),
+                conversation_id=conversation_id,
+                answer=(
+                    "File processing failed. Please re-upload the file and try again."
+                ),
+                used_rag=False,
+                file_ids=[],
+            )
+
+        if processing_files:
             return ChatResponse(
                 message_id=str(uuid.uuid4()),
                 conversation_id=conversation_id,
@@ -503,7 +511,7 @@ async def chat(
                 file_ids=[],
             )
 
-        if not ready_files and not processing_files:
+        if not ready_files:
             return ChatResponse(
                 message_id=str(uuid.uuid4()),
                 conversation_id=conversation_id,
@@ -524,6 +532,13 @@ async def chat(
             conversation_id=conversation_id,
             file_ids=ready_file_ids,
             chunk_ids=chunk_ids,
+        )
+
+        logger.info(
+            "Chat response ready (conversation=%s, actor=%s, used_rag=%s)",
+            conversation_id,
+            actor_id,
+            agent_response.get("used_rag"),
         )
 
         # Persist message in SQL
@@ -603,7 +618,6 @@ async def root():
         "endpoints": {
             "files": {
                 "upload": "POST /upload  (headers: x-actor-id, x-conversation-id)",
-                "status": "GET /files/{file_id}/status",
             },
             "chat": {
                 "send": "POST /chat  (headers: x-actor-id, x-conversation-id)",

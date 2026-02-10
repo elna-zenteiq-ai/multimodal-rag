@@ -159,6 +159,7 @@ class MilvusService:
             List of stringified Milvus primary-key IDs.
         """
         if not documents:
+            logger.warning("No documents provided for Milvus insert")
             return []
 
         col = self._ensure_collection()
@@ -203,6 +204,7 @@ class MilvusService:
         Returns:
             List of Document objects with metadata.
         """
+        logger.info("Milvus search (top_k=%d)", top_k)
         col = self._ensure_collection()
         query_vec = self._embed_query(query)
 
@@ -229,6 +231,7 @@ class MilvusService:
         Returns:
             List of (Document, distance) tuples.
         """
+        logger.info("Milvus search_with_scores (top_k=%d)", top_k)
         col = self._ensure_collection()
         query_vec = self._embed_query(query)
 
@@ -266,6 +269,7 @@ class MilvusService:
             List of matching Document objects.
         """
         if not chunk_ids:
+            logger.warning("search_by_chunk_ids called with empty chunk_ids")
             return []
 
         col = self._ensure_collection()

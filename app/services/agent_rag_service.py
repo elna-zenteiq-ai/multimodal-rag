@@ -251,8 +251,10 @@ class AgentRAGService:
             chunk_ids = self.db_service.get_chunk_ids_for_files(file_ids)
 
         logger.info(
-            f"Processing query: {query[:100]}... | "
-            f"conversation={conversation_id} | files={len(file_ids)}"
+            "Processing query (conversation=%s, files=%d, chunks=%d)",
+            conversation_id,
+            len(file_ids),
+            len(chunk_ids or []),
         )
 
         # Shared list to capture raw docs returned by the tool
@@ -308,6 +310,11 @@ class AgentRAGService:
             self._injected_file_ids[conversation_id] = injected | {
                 fid for fid, _ in new_summaries
             }
+            logger.info(
+                "Injected %d summaries into conversation %s",
+                len(new_summaries),
+                conversation_id,
+            )
 
         messages.append(HumanMessage(content=query))
 
@@ -330,8 +337,10 @@ class AgentRAGService:
         used_rag = len(retrieved_docs) > 0
 
         logger.info(
-            f"Agent finished: total_msgs={len(output_messages)}, "
-            f"retrieved_docs={len(retrieved_docs)}, used_rag={used_rag}"
+            "Agent finished (total_msgs=%d, retrieved_docs=%d, used_rag=%s)",
+            len(output_messages),
+            len(retrieved_docs),
+            used_rag,
         )
 
         # Sort by relevance (lowest L2 distance first) and cap at 5
